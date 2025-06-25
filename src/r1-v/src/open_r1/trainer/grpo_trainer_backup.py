@@ -48,7 +48,6 @@ from trl.trainer.utils import generate_model_card, get_comet_experiment_url
 
 import copy
 
-from qwen_vl_utils import process_vision_info, fetch_video
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -65,28 +64,21 @@ class Qwen2VLGRPOTrainer(Trainer):
     """
     Trainer for the Group Relative Policy Optimization (GRPO) method. This algorithm was initially proposed in the
     paper [DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models](https://huggingface.co/papers/2402.03300).
-
     Example:
-
     ```python
     from datasets import load_dataset
     from trl import GRPOTrainer
-
     dataset = load_dataset("trl-lib/tldr", split="train")
-
     trainer = GRPOTrainer(
         model="Qwen/Qwen2-0.5B-Instruct",
         reward_funcs="weqweasdas/RM-Gemma-2B",
         train_dataset=dataset,
     )
-
     trainer.train()
     ```
-
     Args:
         model (`Union[str, PreTrainedModel]`):
             Model to be trained. Can be either:
-
             - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or
               a path to a *directory* containing model weights saved using
               [`~transformers.PreTrainedModel.save_pretrained`], e.g., `'./my_model_directory/'`. The model is
@@ -96,7 +88,6 @@ class Qwen2VLGRPOTrainer(Trainer):
         reward_funcs (`Union[RewardFunc, list[RewardFunc]]`):
             Reward functions to be used for computing the rewards. To compute the rewards, we call all the reward
             functions with the prompts and completions and sum the rewards. Can be either:
-
             - A single reward function, such as:
                 - A string: The *model ID* of a pretrained model hosted inside a model repo on huggingface.co, or a
                 path to a *directory* containing model weights saved using
@@ -114,7 +105,6 @@ class Qwen2VLGRPOTrainer(Trainer):
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
             Dataset to use for training. It must include a column `"prompt"`. Any additional columns in the dataset is
             ignored. The format of the samples can be either:
-
             - [Standard](dataset_formats#standard): Each sample contains plain text.
             - [Conversational](dataset_formats#conversational): Each sample contains structured messages (e.g., role
               and content).
@@ -125,7 +115,6 @@ class Qwen2VLGRPOTrainer(Trainer):
             processing class is loaded from the model's name with [`~transformers.AutoTokenizer.from_pretrained`].
         reward_processing_classes (`Union[PreTrainedTokenizerBase, list[PreTrainedTokenizerBase]]`, *optional*, defaults to `None`):
             Processing classes corresponding to the reward functions specified in `reward_funcs`. Can be either:
-
             - A single processing class: Used when `reward_funcs` contains only one reward function.
             - A list of processing classes: Must match the order and length of the reward functions in `reward_funcs`.
             If set to `None`, or if an element of the list corresponding to a [`~transformers.PreTrainedModel`] is
@@ -135,7 +124,6 @@ class Qwen2VLGRPOTrainer(Trainer):
         callbacks (list of [`~transformers.TrainerCallback`], *optional*, defaults to `None`):
             List of callbacks to customize the training loop. Will add those to the list of default callbacks
             detailed in [here](https://huggingface.co/docs/transformers/main_classes/callback).
-
             If you want to remove one of the default callbacks used, use the [`~transformers.Trainer.remove_callback`]
             method.
         optimizers (`tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]`, *optional*, defaults to `(None, None)`):
@@ -357,60 +345,12 @@ class Qwen2VLGRPOTrainer(Trainer):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
 
-        # Clean up the prompts to remove None values from content parts
-        for item in inputs:
-            prompt = item.get("prompt")
-            if prompt:
-                for message in prompt:
-                    if "content" in message and isinstance(message["content"], list):
-                        new_content = []
-                        for part in message["content"]:
-                            new_part = {"type": part["type"]}
-                            if part.get("text") is not None:
-                                new_part["text"] = part["text"]
-                            if part.get("video") is not None:
-                                new_part["video"] = part["video"]
-                            new_content.append(new_part)
-                        message["content"] = new_content
-
         prompts = [x["prompt"] for x in inputs]
-        prompts_text = [
-            self.processing_class.apply_chat_template(p, tokenize=False, add_generation_prompt=True) for p in prompts
-        ]
-        
-        video_inputs = []
-        
-        for x in inputs:
-            prompt_copy = copy.deepcopy(x["prompt"])
-            
-            # Let's not modify the video format in the prompt copy, but rather process
-            # each message directly without changing its structure
-            try:
-                _, vids = process_vision_info(prompt_copy)
-                if vids:
-                    video_inputs.extend(vids)
-            except Exception as e:
-                # If there's an error in processing, we'll try an alternative approach
-                # This is a fallback in case the original structure doesn't work
-                for message in prompt_copy:
-                    if isinstance(message.get("content"), list):
-                        # Process each message's content items individually
-                        for content_part in message["content"]:
-                            if content_part.get("type") == "video" and content_part.get("video"):
-                                try:
-                                    # Create a standalone item that fetch_video can process
-                                    video_item = {"video": content_part["video"]}
-                                    print(f"Processing video: {video_item}")
-                                    video, _ = fetch_video(video_item, return_video_sample_fps=True)
-                                    video_corrected = video.to(torch.uint8)
-                                    video_inputs.append(video_corrected)
-                                except Exception as video_err:
-                                    print(f"Error processing video: {video_err}")
-                                    print(f"Video content: {content_part['video']}")
-
+        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        images = [x["image"] for x in inputs]
         prompt_inputs = self.processing_class(
             text=prompts_text,
-            videos=video_inputs,
+            images=images,
             return_tensors="pt",
             padding=True,
             padding_side="left",
@@ -419,8 +359,8 @@ class Qwen2VLGRPOTrainer(Trainer):
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
 
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-        pixel_values = prompt_inputs.get("pixel_values")
-        image_grid_thw = prompt_inputs.get("image_grid_thw")
+        pixel_values = prompt_inputs["pixel_values"]
+        image_grid_thw = prompt_inputs["image_grid_thw"]
 
         
         if self.max_prompt_length is not None:
@@ -446,9 +386,8 @@ class Qwen2VLGRPOTrainer(Trainer):
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B*G, P+C)
-        if pixel_values is not None:
-            pixel_values = prompt_inputs["pixel_values"].repeat(self.num_generations, 1)
-            image_grid_thw = prompt_inputs["image_grid_thw"].repeat_interleave(self.num_generations, dim=0)
+        pixel_values = prompt_inputs["pixel_values"].repeat(self.num_generations, 1)
+        image_grid_thw = prompt_inputs["image_grid_thw"].repeat_interleave(self.num_generations, dim=0)
 
         per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, attention_mask, pixel_values, image_grid_thw)
         # Get rid of the prompt (-1 because of the shift done in get_per_token_logps)
@@ -554,7 +493,6 @@ class Qwen2VLGRPOTrainer(Trainer):
     ):
         """
         Creates a draft of a model card using the information available to the `Trainer`.
-
         Args:
             model_name (`str` or `None`, *optional*, defaults to `None`):
                 Name of the model.

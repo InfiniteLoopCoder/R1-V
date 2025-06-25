@@ -26,9 +26,6 @@ from open_r1.trainer import Qwen2VLGRPOTrainer, Qwen2VLGRPOVLLMTrainer, Qwen2VLG
 from trl import GRPOConfig, GRPOTrainer, ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
 
-DATASET_ROOT_PATH = "/home/yaofeng/R1-V/Robot-VLA-R1"
-
-
 @dataclass
 class GRPOScriptArguments(ScriptArguments):
     """
@@ -122,80 +119,59 @@ def main(script_args, training_args, model_args):
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
 
     # Load the dataset
-    dataset = load_dataset("json", data_files=script_args.dataset_name)
+    dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
+
 
     # Format into conversation
     def make_conversation(example):
-        # For GRPO, we need a 'prompt' and the original 'solution' for the reward function.
         return {
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": example["problem"]},
             ],
-            "solution": example["solution"],
         }
 
-    QUESTION_TEMPLATE = "{Question}  Output the thinking process in <think> </think> and final answer (number) in <answer> </answer> tags."
-
-
-    # def make_conversation_video(example):
-    #     video_relative_path = example.get("path")
-    #     full_video_path = os.path.join(DATASET_ROOT_PATH, video_relative_path)
-
-    #     user_content = []
-    #     if os.path.exists(full_video_path):
-    #         user_content.append({"type": "video", "video": full_video_path})
-    #     else:
-    #         print(f"Warning: Video path does not exist, skipping: {full_video_path}")
-
-    #     user_content.append({"type": "text", "text": QUESTION_TEMPLATE.format(Question=example["problem"])})
-
-    #     # For GRPO, we need a 'prompt' and the original 'solution' for the reward function.
+    # def make_conversation_image(example):
     #     return {
     #         "prompt": [
     #             {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
     #             {
     #                 "role": "user",
-    #                 "content": user_content,
+    #                 "content": [
+    #                     {"type": "image"},
+    #                     {"type": "text", "text": example["problem"]},
+    #                 ],
     #             },
     #         ],
-    #         "solution": example["solution"],
     #     }
 
-    # grpo.py
+    QUESTION_TEMPLATE = "{Question}  Output the thinking process in <think> </think> and final answer (number) in <answer> </answer> tags."
 
-    def make_conversation_video(example):
-        video_relative_path = example.get("path")
-        full_video_path = os.path.join(DATASET_ROOT_PATH, video_relative_path)
-
-        user_content = []
-        if os.path.exists(full_video_path):
-            user_content.append({"type": "video", "video": full_video_path})
-        else:
-            print(f"Warning: Video path does not exist, skipping: {full_video_path}")
-
-        user_content.append({"type": "text", "text": QUESTION_TEMPLATE.format(Question=example["problem"])})
-
+    def make_conversation_image(example):
         return {
             "prompt": [
-                {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
                 {
                     "role": "user",
-                    "content": user_content,
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": QUESTION_TEMPLATE.format(Question=example["problem"])},
+                    ],
                 },
             ],
-            "solution": example["solution"],
         }
 
-    if "path" in dataset[script_args.dataset_train_split].features:
-        print("has video in dataset")
-        dataset = dataset.map(
-            make_conversation_video, remove_columns=dataset[script_args.dataset_train_split].column_names
-        )  # Utilize multiprocessing for faster mapping
-    else:
-        print("no video in dataset")
-        dataset = dataset.map(make_conversation, remove_columns=dataset[script_args.dataset_train_split].column_names)
 
+    if "image" in dataset[script_args.dataset_train_split].features:
+        print("has image in dataset")
+        dataset = dataset.map(make_conversation_image)  # Utilize multiprocessing for faster mapping
+        # dataset = dataset.remove_columns(["original_question", "original_answer"])
+
+    else:
+        print("no image in dataset")
+        dataset = dataset.map(make_conversation)
+        dataset = dataset.remove_columns("messages")
+
+    
     trainer_cls = Qwen2VLGRPOTrainer if not training_args.use_vllm else Qwen2VLGRPOVLLMTrainerModified
     print("using: ", trainer_cls)
 
