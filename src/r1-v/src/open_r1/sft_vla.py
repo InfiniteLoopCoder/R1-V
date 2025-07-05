@@ -155,7 +155,6 @@ def collate_fn(examples, dataset_root_path=None):
     # 1. Convert all examples to the "messages" format.
     converted_examples = [convert_example(ex, dataset_root_path=dataset_root_path) for ex in examples]
 
-    print(converted_examples)
     # 2. Apply chat template to get the text for each example.
     texts = [
         processor.apply_chat_template(ex["messages"], tokenize=False, add_generation_prompt=True)
@@ -169,12 +168,9 @@ def collate_fn(examples, dataset_root_path=None):
         _, vids = process_vision_info(ex["messages"])
         if vids:
             video_inputs.extend(vids)
-
-    print(video_inputs)
     
     # 4. Use the processor to tokenize text and prepare video tensors.
-    print(texts)
-    exit()
+
     batch = processor(
         text=texts,
         videos=video_inputs if video_inputs else None,
