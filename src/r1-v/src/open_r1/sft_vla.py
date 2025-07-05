@@ -149,8 +149,7 @@ def convert_example(example, dataset_root_path=None):
     
     example["messages"] = messages
     return example
-
-
+    
 def collate_fn(examples, dataset_root_path=None):
     # 1. Convert all examples to the "messages" format.
     converted_examples = [convert_example(ex, dataset_root_path=dataset_root_path) for ex in examples]
@@ -164,8 +163,12 @@ def collate_fn(examples, dataset_root_path=None):
     # 3. Process all video inputs from the batch, ignoring images.
     video_inputs = []
     for ex in converted_examples:
-        # process_vision_info returns (images, videos). We ignore images with _.
-        _, vids = process_vision_info(ex["messages"])
+        try:
+            # process_vision_info returns (images, videos). We ignore images with _.
+            _, vids = process_vision_info(ex["messages"])
+        except Exception:
+            vids = [] # If video processing fails, treat it as no video.
+            
         if vids:
             video_inputs.extend(vids)
 
@@ -186,6 +189,42 @@ def collate_fn(examples, dataset_root_path=None):
     batch["labels"] = labels
 
     return batch
+
+# def collate_fn(examples, dataset_root_path=None):
+#     # 1. Convert all examples to the "messages" format.
+#     converted_examples = [convert_example(ex, dataset_root_path=dataset_root_path) for ex in examples]
+
+#     # 2. Apply chat template to get the text for each example.
+#     texts = [
+#         processor.apply_chat_template(ex["messages"], tokenize=False, add_generation_prompt=True)
+#         for ex in converted_examples
+#     ]
+    
+#     # 3. Process all video inputs from the batch, ignoring images.
+#     video_inputs = []
+#     for ex in converted_examples:
+#         # process_vision_info returns (images, videos). We ignore images with _.
+#         _, vids = process_vision_info(ex["messages"])
+#         if vids:
+#             video_inputs.extend(vids)
+
+#     # 4. Use the processor to tokenize text and prepare video tensors.
+#     batch = processor(
+#         text=texts,
+#         videos=video_inputs if video_inputs else None,
+#         return_tensors="pt",
+#         padding=True,
+#     )
+
+#     # 5. Create labels for language model training.
+#     labels = batch["input_ids"].clone()
+#     # Mask out padding tokens and any residual image/video tokens
+#     labels[labels == processor.tokenizer.pad_token_id] = -100
+#     image_token_id = processor.tokenizer.convert_tokens_to_ids(processor.image_token)
+#     labels[labels == image_token_id] = -100
+#     batch["labels"] = labels
+
+#     return batch
 
 
 def main(script_args, training_args, model_args):
