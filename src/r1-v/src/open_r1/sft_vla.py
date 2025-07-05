@@ -168,9 +168,8 @@ def collate_fn(examples, dataset_root_path=None):
         _, vids = process_vision_info(ex["messages"])
         if vids:
             video_inputs.extend(vids)
-    
-    # 4. Use the processor to tokenize text and prepare video tensors.
 
+    # 4. Use the processor to tokenize text and prepare video tensors.
     batch = processor(
         text=texts,
         videos=video_inputs if video_inputs else None,
