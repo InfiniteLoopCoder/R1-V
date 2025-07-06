@@ -171,6 +171,7 @@ class Qwen2VLGRPOTrainer(Trainer):
         # Trained model
         model_init_kwargs = args.model_init_kwargs or {}
         model_init_kwargs["attn_implementation"] = attn_implementation
+        model_init_kwargs["torch_dtype"]= torch.bfloat16
         if isinstance(model, str):
             model_id = model
             torch_dtype = model_init_kwargs.get("torch_dtype")
@@ -335,8 +336,8 @@ class Qwen2VLGRPOTrainer(Trainer):
 
 
     # Get the per-token log probabilities for the completions for the model and the reference model
-    def _get_per_token_logps(self, model, input_ids, attention_mask, pixel_values, image_grid_thw):
-        logits = model(input_ids, attention_mask=attention_mask, pixel_values=pixel_values, image_grid_thw=image_grid_thw).logits  # (B, L, V)
+    def _get_per_token_logps(self, model, input_ids, attention_mask, pixel_values_videos, video_grid_thw):
+        logits = model(input_ids, attention_mask=attention_mask, pixel_values_videos=pixel_values_videos, video_grid_thw=video_grid_thw).logits  # (B, L, V)
         logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
         input_ids = input_ids[:, 1:]  # (B, L-1), exclude the first input ID since we don't have logits for it
         # Compute the log probabilities for the input tokens. Use a loop to reduce memory peak.
@@ -383,34 +384,55 @@ class Qwen2VLGRPOTrainer(Trainer):
         for x in inputs:
             prompt_copy = copy.deepcopy(x["prompt"])
             
-            # Let's not modify the video format in the prompt copy, but rather process
-            # each message directly without changing its structure
             try:
+                # First attempt using the primary function
                 _, vids = process_vision_info(prompt_copy)
                 if vids:
                     video_inputs.extend(vids)
-            except Exception as e:
-                # If there's an error in processing, we'll try an alternative approach
-                # This is a fallback in case the original structure doesn't work
-                for message in prompt_copy:
-                    if isinstance(message.get("content"), list):
-                        # Process each message's content items individually
-                        for content_part in message["content"]:
-                            if content_part.get("type") == "video" and content_part.get("video"):
-                                try:
-                                    # Create a standalone item that fetch_video can process
+            except Exception as e1:
+                # If the first attempt fails, try the fallback logic.
+                try:
+                    # Second attempt using the fallback logic
+                    for message in prompt_copy:
+                        if isinstance(message.get("content"), list):
+                            for content_part in message["content"]:
+                                if content_part.get("type") == "video" and content_part.get("video"):
                                     video_item = {"video": content_part["video"]}
-                                    print(f"Processing video: {video_item}")
                                     video, _ = fetch_video(video_item, return_video_sample_fps=True)
                                     video_corrected = video.to(torch.uint8)
                                     video_inputs.append(video_corrected)
-                                except Exception as video_err:
-                                    print(f"Error processing video: {video_err}")
-                                    print(f"Video content: {content_part['video']}")
+                except Exception as e2:
+                    # If the fallback logic ALSO fails, log it and skip the video.
+                    print(f"Error: Fallback video processing also failed (Error: {e2}). Skipping video for this item.")
+                    pass
+            # # Let's not modify the video format in the prompt copy, but rather process
+            # # each message directly without changing its structure
+            # try:
+            #     _, vids = process_vision_info(prompt_copy)
+            #     if vids:
+            #         video_inputs.extend(vids)
+            # except Exception as e:
+            #     # If there's an error in processing, we'll try an alternative approach
+            #     # This is a fallback in case the original structure doesn't work
+            #     for message in prompt_copy:
+            #         if isinstance(message.get("content"), list):
+            #             # Process each message's content items individually
+            #             for content_part in message["content"]:
+            #                 if content_part.get("type") == "video" and content_part.get("video"):
+            #                     try:
+            #                         # Create a standalone item that fetch_video can process
+            #                         video_item = {"video": content_part["video"]}
+            #                         print(f"Processing video: {video_item}")
+            #                         video, _ = fetch_video(video_item, return_video_sample_fps=True)
+            #                         video_corrected = video.to(torch.uint8)
+            #                         video_inputs.append(video_corrected)
+            #                     except Exception as video_err:
+            #                         print(f"Error processing video: {video_err}")
+            #                         print(f"Video content: {content_part['video']}")
 
         prompt_inputs = self.processing_class(
             text=prompts_text,
-            videos=video_inputs,
+            videos=video_inputs if video_inputs else None, # This line works as you expect.
             return_tensors="pt",
             padding=True,
             padding_side="left",
@@ -419,8 +441,10 @@ class Qwen2VLGRPOTrainer(Trainer):
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
 
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-        pixel_values = prompt_inputs.get("pixel_values")
-        image_grid_thw = prompt_inputs.get("image_grid_thw")
+
+        pixel_values_videos = prompt_inputs.get("pixel_values_videos")
+        
+        video_grid_thw = prompt_inputs.get("video_grid_thw")
 
         
         if self.max_prompt_length is not None:
@@ -446,20 +470,20 @@ class Qwen2VLGRPOTrainer(Trainer):
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B*G, P+C)
-        if pixel_values is not None:
-            pixel_values = prompt_inputs["pixel_values"].repeat(self.num_generations, 1)
-            image_grid_thw = prompt_inputs["image_grid_thw"].repeat_interleave(self.num_generations, dim=0)
+        if pixel_values_videos is not None:
+            pixel_values_videos = prompt_inputs["pixel_values_videos"].repeat(self.num_generations, 1)
+            video_grid_thw = prompt_inputs["video_grid_thw"].repeat_interleave(self.num_generations, dim=0)
 
-        per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, attention_mask, pixel_values, image_grid_thw)
+        per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, attention_mask, pixel_values_videos, video_grid_thw)
         # Get rid of the prompt (-1 because of the shift done in get_per_token_logps)
         per_token_logps = per_token_logps[:, prompt_length - 1 :]
 
         with torch.inference_mode():
             if self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(self.ref_model, prompt_completion_ids, attention_mask, pixel_values, image_grid_thw)
+                ref_per_token_logps = self._get_per_token_logps(self.ref_model, prompt_completion_ids, attention_mask, pixel_values_videos, video_grid_thw)
             else:
                 with self.accelerator.unwrap_model(model).disable_adapter():
-                    ref_per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, attention_mask, pixel_values, image_grid_thw)
+                    ref_per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, attention_mask, pixel_values_videos, video_grid_thw)
         ref_per_token_logps = ref_per_token_logps[:, prompt_length - 1 :]
 
         # Compute the KL divergence between the model and the reference model
